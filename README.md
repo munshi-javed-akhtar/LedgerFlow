@@ -330,6 +330,164 @@ dotnet run --project src/LedgerFlow.API/LedgerFlow.API.csproj
 
 ---
 
+
+## End-to-End (E2E) Testing Guide
+
+This section explains how to validate LedgerFlow as a running system (API + PostgreSQL + Redis), not just unit tests.
+
+### 1) Prerequisites
+- Docker Desktop / Docker Engine + Compose v2
+- `curl` (or Postman/Insomnia)
+- Optional: `jq` for easier JSON parsing
+
+### 2) Start the full stack
+```bash
+docker compose up --build -d
+```
+
+Check containers:
+```bash
+docker compose ps
+```
+
+Expected:
+- `api` is running on `http://localhost:8080`
+- `postgres` on `localhost:5432`
+- `redis` on `localhost:6379`
+
+### 3) Health-check the API
+```bash
+curl -s http://localhost:8080/health
+```
+
+Expected: JSON similar to
+```json
+{"status":"Healthy","utc":"..."}
+```
+
+### 4) Open Swagger for manual E2E calls
+- URL: `http://localhost:8080/swagger`
+- Use this for request/response inspection and quick endpoint exploration.
+
+### 5) Obtain a JWT token for secured endpoints
+Current scaffold does not yet include `/api/auth/login`, so for E2E testing `POST /api/transactions/transfer` you have two practical options:
+
+#### Option A (recommended for current scaffold): temporary dev bypass
+Temporarily remove `.RequireAuthorization()` from transfer endpoint in `Program.cs`, rebuild, and run E2E transfer payload tests.
+
+#### Option B: generate a dev JWT matching appsettings
+Generate a signed token using the configured `Jwt:Key`, `Jwt:Issuer`, and `Jwt:Audience`, then call the transfer endpoint with:
+```http
+Authorization: Bearer <token>
+```
+
+### 6) Prepare database state for transfer E2E
+The transfer endpoint expects sender/receiver wallets to exist in PostgreSQL.
+
+Connect to postgres container:
+```bash
+docker exec -it $(docker compose ps -q postgres) psql -U postgres -d ledgerflow
+```
+
+Create minimal tables and sample wallets (if migrations are not yet added):
+```sql
+CREATE TABLE IF NOT EXISTS wallets (
+  id uuid PRIMARY KEY,
+  userid uuid NOT NULL,
+  currency varchar(3) NOT NULL,
+  balance numeric(18,2) NOT NULL,
+  status int NOT NULL,
+  createdatutc timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS transactions (
+  id uuid PRIMARY KEY,
+  sourcewalletid uuid NOT NULL,
+  destinationwalletid uuid NOT NULL,
+  amount numeric(18,2) NOT NULL,
+  currency varchar(3) NOT NULL,
+  type text NOT NULL,
+  status text NOT NULL,
+  createdatutc timestamptz NOT NULL DEFAULT now()
+);
+
+INSERT INTO wallets (id, userid, currency, balance, status)
+VALUES
+('11111111-1111-1111-1111-111111111111', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'USD', 1000, 1),
+('22222222-2222-2222-2222-222222222222', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'USD', 100, 1)
+ON CONFLICT (id) DO NOTHING;
+```
+
+### 7) Execute transfer request (E2E)
+```bash
+curl -i -X POST http://localhost:8080/api/transactions/transfer   -H "Content-Type: application/json"   -H "Authorization: Bearer <token-or-use-dev-bypass>"   -d '{
+    "sourceWalletId":"11111111-1111-1111-1111-111111111111",
+    "destinationWalletId":"22222222-2222-2222-2222-222222222222",
+    "amount":150,
+    "currency":"USD",
+    "idempotencyKey":"e2e-test-001",
+    "userId":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+  }'
+```
+
+Expected:
+- HTTP `200 OK`
+- response includes transaction id and status `Completed`
+
+### 8) Verify DB side effects (critical E2E assertion)
+Inside `psql`:
+```sql
+SELECT id, balance FROM wallets
+WHERE id IN (
+  '11111111-1111-1111-1111-111111111111',
+  '22222222-2222-2222-2222-222222222222'
+)
+ORDER BY id;
+
+SELECT id, sourcewalletid, destinationwalletid, amount, status
+FROM transactions
+ORDER BY createdatutc DESC
+LIMIT 5;
+```
+
+Expected:
+- sender wallet balance decreases by amount
+- receiver wallet balance increases by amount
+- a transaction row is inserted once per successful call
+
+### 9) Negative-path E2E checks
+Run these to validate consistency behavior:
+
+1. **Insufficient balance**
+   - Send amount higher than sender balance.
+   - Expected: failure (non-200) and no partial balance update.
+
+2. **Frozen wallet**
+   - `UPDATE wallets SET status = 2 WHERE id = '<sender-or-receiver>';`
+   - Expected: transfer blocked.
+
+3. **Invalid payload**
+   - amount <= 0 or same source/destination wallet.
+   - Expected: validation problem response.
+
+### 10) End the test session
+```bash
+docker compose down
+```
+
+To remove volumes and reset data:
+```bash
+docker compose down -v
+```
+
+### E2E Automation Next Step (recommended)
+As the next maturity step, add an automated E2E test project that:
+- boots dependencies via Testcontainers
+- seeds wallets
+- calls API via `HttpClient`
+- asserts DB balances and transaction rows after each scenario
+
+
 ## Testing
 
 ```bash
