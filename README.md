@@ -488,6 +488,66 @@ As the next maturity step, add an automated E2E test project that:
 - asserts DB balances and transaction rows after each scenario
 
 
+
+## Frontend Testing Guide (LedgerFlow Dashboard)
+
+Use this checklist to test only the React frontend.
+
+### 1) Prerequisites
+- Node.js 20+ (22 recommended)
+- npm
+- LedgerFlow backend running at `http://localhost:8080` (or update `VITE_API_URL`)
+
+### 2) Install dependencies
+```bash
+cd frontend
+npm install
+```
+
+### 3) Run frontend locally
+```bash
+VITE_API_URL=http://localhost:8080 npm run dev
+```
+
+Open:
+- `http://localhost:5173`
+
+### 4) Manual smoke test flow
+1. Open `/login`.
+2. Validate form rules:
+   - invalid email should show validation error
+   - password under 8 chars should fail validation
+3. Try login request:
+   - with invalid credentials -> expect error toast
+   - with valid backend response -> expect redirect to `/dashboard`
+4. Validate route protection:
+   - without token, opening `/dashboard` should redirect to `/login`
+5. After login, verify pages render:
+   - `/dashboard` (KPI cards + chart)
+   - `/wallets`
+   - `/transactions`
+
+### 5) Production build test
+```bash
+npm run build
+npm run preview
+```
+Open preview URL printed by Vite and verify routes/UI load.
+
+### 6) Optional Docker test for frontend only
+```bash
+docker build -t ledgerflow-dashboard ./frontend
+docker run --rm -p 3000:80 ledgerflow-dashboard
+```
+Open:
+- `http://localhost:3000`
+
+### 7) Quick troubleshooting
+- If API calls fail, confirm backend is running and `VITE_API_URL` is correct.
+- If blank page appears, check browser console for runtime errors.
+- If dependencies fail to install, remove `node_modules` and lockfile, then reinstall.
+
+
 ## Testing
 
 ```bash
