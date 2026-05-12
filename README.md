@@ -331,65 +331,106 @@ dotnet run --project src/LedgerFlow.API/LedgerFlow.API.csproj
 ---
 
 
-## End-to-End (E2E) Testing Guide
+## End-to-End (E2E) Testing Guide (Postman + Website)
 
-This section explains how to validate LedgerFlow as a running system (API + PostgreSQL + Redis), not just unit tests.
+This section is a complete step-by-step testing manual for LedgerFlow.
 
-### 1) Prerequisites
-- Docker Desktop / Docker Engine + Compose v2
-- `curl` (or Postman/Insomnia)
-- Optional: `jq` for easier JSON parsing
+It covers:
+- backend API testing from Swagger and Postman
+- frontend testing from the website
+- database verification for transfer consistency
+- common failure troubleshooting (including Swagger 500)
 
-### 2) Start the full stack
+---
+
+### A. What you need before starting
+
+1. Docker + Docker Compose installed
+2. Postman installed
+3. A browser (Chrome/Edge)
+4. Ports free on your machine:
+   - `8080` (API)
+   - `5432` (PostgreSQL)
+   - `6379` (Redis)
+   - `5173` (frontend dev server, optional)
+
+---
+
+### B. Start the backend stack
+
+From repo root:
+
 ```bash
 docker compose up --build -d
 ```
 
-Check containers:
+Check status:
+
 ```bash
 docker compose ps
 ```
 
 Expected:
-- `api` is running on `http://localhost:8080`
-- `postgres` on `localhost:5432`
-- `redis` on `localhost:6379`
+- `api` container is `Up`
+- `postgres` container is `Up`
+- `redis` container is `Up`
 
-### 3) Health-check the API
+Check API health:
+
 ```bash
-curl -s http://localhost:8080/health
+curl -i http://localhost:8080/health
 ```
 
-Expected: JSON similar to
-```json
-{"status":"Healthy","utc":"..."}
+Expected response: `HTTP/1.1 200 OK` + JSON health body.
+
+---
+
+### C. Fixing Swagger error: `Fetch error Internal Server Error /swagger/v1/swagger.json`
+
+If `http://localhost:8080/swagger` opens but shows fetch error:
+
+1. Check API logs:
+
+```bash
+docker compose logs api --tail=200
 ```
 
-### 4) Open Swagger for manual E2E calls
-- URL: `http://localhost:8080/swagger`
-- Use this for request/response inspection and quick endpoint exploration.
+2. Typical root causes:
+   - API crashed at startup
+   - missing/invalid config values
+   - runtime exception during service registration
 
-### 5) Obtain a JWT token for secured endpoints
-Current scaffold does not yet include `/api/auth/login`, so for E2E testing `POST /api/transactions/transfer` you have two practical options:
+3. Verify swagger JSON directly:
 
-#### Option A (recommended for current scaffold): temporary dev bypass
-Temporarily remove `.RequireAuthorization()` from transfer endpoint in `Program.cs`, rebuild, and run E2E transfer payload tests.
-
-#### Option B: generate a dev JWT matching appsettings
-Generate a signed token using the configured `Jwt:Key`, `Jwt:Issuer`, and `Jwt:Audience`, then call the transfer endpoint with:
-```http
-Authorization: Bearer <token>
+```bash
+curl -i http://localhost:8080/swagger/v1/swagger.json
 ```
 
-### 6) Prepare database state for transfer E2E
-The transfer endpoint expects sender/receiver wallets to exist in PostgreSQL.
+4. If status is not `200`, fix the error reported in API logs first, then restart:
 
-Connect to postgres container:
+```bash
+docker compose restart api
+```
+
+5. Re-check:
+- `http://localhost:8080/health`
+- `http://localhost:8080/swagger/v1/swagger.json`
+- `http://localhost:8080/swagger`
+
+---
+
+### D. Prepare database data for transfer tests
+
+Current scaffold does not yet include full migrations/seeding, so create minimal tables and seed wallets manually.
+
+Open PostgreSQL shell:
+
 ```bash
 docker exec -it $(docker compose ps -q postgres) psql -U postgres -d ledgerflow
 ```
 
-Create minimal tables and sample wallets (if migrations are not yet added):
+Run:
+
 ```sql
 CREATE TABLE IF NOT EXISTS wallets (
   id uuid PRIMARY KEY,
@@ -418,75 +459,158 @@ VALUES
 ON CONFLICT (id) DO NOTHING;
 ```
 
-### 7) Execute transfer request (E2E)
+Exit psql with `\q`.
+
+---
+
+### E. API testing via Postman (step-by-step)
+
+> Important: transfer endpoint is protected (`RequireAuthorization`). Current scaffold does not yet include complete login API in backend. Use one of the two approaches below.
+
+#### Option 1 (recommended for quick E2E now): temporary local dev bypass
+1. In `src/LedgerFlow.API/Program.cs`, temporarily remove `.RequireAuthorization()` from transfer mapping.
+2. Rebuild/restart API.
+3. Test transfer without token.
+
+#### Option 2: use Bearer token
+1. Generate JWT using same values in `appsettings.json`:
+   - `Jwt:Key`
+   - `Jwt:Issuer`
+   - `Jwt:Audience`
+2. Add header in Postman:
+   - `Authorization: Bearer <token>`
+
+#### Create Postman request
+- Method: `POST`
+- URL: `http://localhost:8080/api/transactions/transfer`
+- Headers:
+  - `Content-Type: application/json`
+  - `Authorization: Bearer <token>` (if using option 2)
+- Body (raw JSON):
+
+```json
+{
+  "sourceWalletId": "11111111-1111-1111-1111-111111111111",
+  "destinationWalletId": "22222222-2222-2222-2222-222222222222",
+  "amount": 150,
+  "currency": "USD",
+  "idempotencyKey": "postman-e2e-001",
+  "userId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+}
+```
+
+Expected:
+- `200 OK`
+- JSON response with transaction id and status `Completed`
+
+---
+
+### F. Verify transfer consistency in DB (mandatory)
+
+After successful transfer, verify balances and transaction row.
+
 ```bash
-curl -i -X POST http://localhost:8080/api/transactions/transfer   -H "Content-Type: application/json"   -H "Authorization: Bearer <token-or-use-dev-bypass>"   -d '{
-    "sourceWalletId":"11111111-1111-1111-1111-111111111111",
-    "destinationWalletId":"22222222-2222-2222-2222-222222222222",
-    "amount":150,
-    "currency":"USD",
-    "idempotencyKey":"e2e-test-001",
-    "userId":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
-  }'
+docker exec -it $(docker compose ps -q postgres) psql -U postgres -d ledgerflow -c "SELECT id,balance,status FROM wallets ORDER BY id;"
+
+docker exec -it $(docker compose ps -q postgres) psql -U postgres -d ledgerflow -c "SELECT id,sourcewalletid,destinationwalletid,amount,status,createdatutc FROM transactions ORDER BY createdatutc DESC LIMIT 5;"
 ```
 
 Expected:
-- HTTP `200 OK`
-- response includes transaction id and status `Completed`
+- sender balance reduced by transfer amount
+- receiver balance increased by transfer amount
+- exactly one new transaction row per successful call
 
-### 8) Verify DB side effects (critical E2E assertion)
-Inside `psql`:
-```sql
-SELECT id, balance FROM wallets
-WHERE id IN (
-  '11111111-1111-1111-1111-111111111111',
-  '22222222-2222-2222-2222-222222222222'
-)
-ORDER BY id;
+---
 
-SELECT id, sourcewalletid, destinationwalletid, amount, status
-FROM transactions
-ORDER BY createdatutc DESC
-LIMIT 5;
-```
-
-Expected:
-- sender wallet balance decreases by amount
-- receiver wallet balance increases by amount
-- a transaction row is inserted once per successful call
-
-### 9) Negative-path E2E checks
-Run these to validate consistency behavior:
+### G. Negative test cases in Postman
 
 1. **Insufficient balance**
-   - Send amount higher than sender balance.
-   - Expected: failure (non-200) and no partial balance update.
+   - amount > sender balance
+   - expected: failed response, no partial update
 
-2. **Frozen wallet**
-   - `UPDATE wallets SET status = 2 WHERE id = '<sender-or-receiver>';`
-   - Expected: transfer blocked.
+2. **Same source and destination wallet**
+   - set both wallet IDs equal
+   - expected: validation failure
 
-3. **Invalid payload**
-   - amount <= 0 or same source/destination wallet.
-   - Expected: validation problem response.
+3. **Invalid amount**
+   - amount = `0` or negative
+   - expected: validation failure
 
-### 10) End the test session
+4. **Frozen wallet test**
+
+```bash
+docker exec -it $(docker compose ps -q postgres) psql -U postgres -d ledgerflow -c "UPDATE wallets SET status = 2 WHERE id='11111111-1111-1111-1111-111111111111';"
+```
+
+- expected: transfer blocked
+
+---
+
+### H. Frontend (website) testing step-by-step
+
+1. Start frontend:
+
+```bash
+cd frontend
+npm install
+VITE_API_URL=http://localhost:8080 npm run dev
+```
+
+2. Open website:
+- `http://localhost:5173`
+
+3. Test Login page:
+- invalid email -> should show validation message
+- short password (<8) -> should show validation message
+- invalid credentials -> should show error toast
+
+4. Protected route behavior:
+- open `/dashboard` without token -> should redirect to `/login`
+
+5. After successful token set/login flow:
+- dashboard cards and chart should render
+- wallets page should render cards
+- transactions page should render table
+
+---
+
+### I. Swagger testing flow (browser)
+
+1. Open `http://localhost:8080/swagger`
+2. Expand `POST /api/transactions/transfer`
+3. Click **Try it out**
+4. Paste JSON payload
+5. If endpoint is protected, click **Authorize** and add Bearer token
+6. Execute and verify response code/body
+
+---
+
+### J. Clean reset after testing
+
+Stop containers:
+
 ```bash
 docker compose down
 ```
 
-To remove volumes and reset data:
+Remove all test data volumes:
+
 ```bash
 docker compose down -v
 ```
 
-### E2E Automation Next Step (recommended)
-As the next maturity step, add an automated E2E test project that:
-- boots dependencies via Testcontainers
-- seeds wallets
-- calls API via `HttpClient`
-- asserts DB balances and transaction rows after each scenario
+---
 
+### K. Quick checklist (copy/paste for every test run)
+
+- [ ] `docker compose up --build -d`
+- [ ] `curl http://localhost:8080/health`
+- [ ] `http://localhost:8080/swagger` loads without 500
+- [ ] seed wallets/tables created
+- [ ] Postman transfer returns expected result
+- [ ] DB balances and transaction row verified
+- [ ] frontend login/dashboard/wallets/transactions pages verified
+- [ ] negative scenarios validated
 
 
 ## Frontend Testing Guide (LedgerFlow Dashboard)
